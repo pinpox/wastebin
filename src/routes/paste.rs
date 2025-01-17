@@ -1,7 +1,9 @@
 use crate::cache::Key as CacheKey;
 use crate::crypto::Password;
 use crate::db::read::Entry;
+use crate::env::BASE_PATH;
 use crate::highlight::Html;
+use crate::pages::Burn;
 use crate::routes::{form, json};
 use crate::{pages, AppState, Error};
 use axum::body::Body;
@@ -38,7 +40,8 @@ pub struct PasswordForm {
 fn qr_code_from(
     state: AppState,
     headers: &HeaderMap,
-    id: &str,
+    id: String,
+    ext: Option<String>,
 ) -> Result<qrcodegen::QrCode, Error> {
     let base_url = &state.base_url.map_or_else(
         || {
@@ -54,8 +57,14 @@ fn qr_code_from(
         Ok,
     )?;
 
+    let name = if let Some(ext) = ext {
+        format!("{id}.{ext}")
+    } else {
+        id
+    };
+
     Ok(qrcodegen::QrCode::encode_text(
-        base_url.join(id)?.as_str(),
+        base_url.join(&name)?.as_str(),
         qrcodegen::QrCodeEcc::High,
     )?)
 }
@@ -64,13 +73,20 @@ async fn get_qr(
     state: AppState,
     key: CacheKey,
     headers: HeaderMap,
+    title: String,
 ) -> Result<pages::Qr<'static>, pages::ErrorResponse<'static>> {
     let id = key.id();
-    let qr_code = tokio::task::spawn_blocking(move || qr_code_from(state, &headers, &id))
+    let ext = if key.ext.is_empty() {
+        None
+    } else {
+        Some(key.ext.clone())
+    };
+
+    let qr_code = tokio::task::spawn_blocking(move || qr_code_from(state, &headers, id, ext))
         .await
         .map_err(Error::from)??;
 
-    Ok(pages::Qr::new(qr_code, key))
+    Ok(pages::Qr::new(qr_code, key, title))
 }
 
 fn get_download(
@@ -110,17 +126,21 @@ async fn get_html(
         .transpose()
         .map_err(|err| Error::CookieParsing(err.to_string()))?
         .zip(entry.uid)
-        .map_or(false, |(user_uid, owner_uid)| user_uid == owner_uid);
+        .is_some_and(|(user_uid, owner_uid)| user_uid == owner_uid);
 
     if let Some(html) = state.cache.get(&key) {
         tracing::trace!(?key, "found cached item");
-        return Ok(pages::Paste::new(key, html, can_delete).into_response());
+        return Ok(
+            pages::Paste::new(key, html, can_delete, entry.title.unwrap_or_default())
+                .into_response(),
+        );
     }
 
     // TODO: turn this upside-down, i.e. cache it but only return a cached version if we were able
     // to decrypt the content. Highlighting is probably still much slower than decryption.
     let can_be_cached = !entry.must_be_deleted;
     let ext = key.ext.clone();
+    let title = entry.title.clone().unwrap_or_default();
     let html = Html::from(entry, ext).await?;
 
     if can_be_cached && !is_protected {
@@ -128,7 +148,7 @@ async fn get_html(
         state.cache.put(key.clone(), html.clone());
     }
 
-    Ok(pages::Paste::new(key, html, can_delete).into_response())
+    Ok(pages::Paste::new(key, html, can_delete, title).into_response())
 }
 
 pub async fn get(
@@ -159,7 +179,13 @@ pub async fn get(
 
             match query.fmt {
                 Some(Format::Raw) => return Ok(entry.text.into_response()),
-                Some(Format::Qr) => return Ok(get_qr(state, key, headers).await.into_response()),
+                Some(Format::Qr) => {
+                    return Ok(
+                        get_qr(state, key, headers, entry.title.clone().unwrap_or_default())
+                            .await
+                            .into_response(),
+                    )
+                }
                 None => (),
             }
 
@@ -193,12 +219,25 @@ pub async fn insert(
         .ok_or_else(|| StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response())?;
 
     if content_type == headers::ContentType::form_url_encoded() {
+        let is_https = headers
+            .get(http::header::HOST)
+            .zip(headers.get(http::header::ORIGIN))
+            .and_then(|(host, origin)| host.to_str().ok().zip(origin.to_str().ok()))
+            .and_then(|(host, origin)| {
+                origin
+                    .strip_prefix("https://")
+                    .map(|origin| origin.starts_with(host))
+            })
+            .unwrap_or(false);
+
         let entry: Form<form::Entry> = request
             .extract()
             .await
             .map_err(IntoResponse::into_response)?;
 
-        Ok(form::insert(state, jar, entry).await.into_response())
+        Ok(form::insert(state, jar, entry, is_https)
+            .await
+            .into_response())
     } else if content_type == headers::ContentType::json() {
         let entry: Json<json::Entry> = request
             .extract()
@@ -224,7 +263,7 @@ pub async fn delete(
         .transpose()
         .map_err(|err| Error::CookieParsing(err.to_string()))?
         .zip(uid)
-        .map_or(false, |(user_uid, db_uid)| user_uid == db_uid);
+        .is_some_and(|(user_uid, db_uid)| user_uid == db_uid);
 
     if !can_delete {
         Err(Error::Delete)?;
@@ -232,5 +271,18 @@ pub async fn delete(
 
     state.db.delete(id).await?;
 
-    Ok(Redirect::to("/"))
+    Ok(Redirect::to(BASE_PATH.path()))
+}
+
+pub async fn burn_created(
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    state: State<AppState>,
+) -> Result<impl IntoResponse, pages::ErrorResponse<'static>> {
+    let id_clone = id.clone();
+    let qr_code = tokio::task::spawn_blocking(move || qr_code_from(state.0, &headers, id, None))
+        .await
+        .map_err(Error::from)??;
+
+    Ok(Burn::new(qr_code, id_clone))
 }

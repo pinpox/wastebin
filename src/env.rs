@@ -2,10 +2,9 @@ use crate::{db, highlight};
 use axum_extra::extract::cookie::Key;
 use std::env::VarError;
 use std::net::SocketAddr;
-use std::num::{NonZeroUsize, ParseIntError};
+use std::num::{NonZero, NonZeroU32, NonZeroUsize, ParseIntError};
 use std::path::PathBuf;
-use std::string::String;
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 pub struct Metadata<'a> {
@@ -16,7 +15,8 @@ pub struct Metadata<'a> {
 
 pub const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub const CSS_MAX_AGE: Duration = Duration::from_secs(60 * 60 * 24 * 30 * 6);
+pub const CSS_MAX_AGE: Duration = Duration::from_secs(60 * 60 * 24 * 30 * 6); // 6 month
+pub const JS_MAX_AGE: Duration = Duration::from_secs(60 * 60 * 24 * 30 * 6); // 6 month
 
 pub const FAVICON_MAX_AGE: Duration = Duration::from_secs(86400);
 
@@ -28,6 +28,7 @@ const VAR_SIGNING_KEY: &str = "WASTEBIN_SIGNING_KEY";
 const VAR_BASE_URL: &str = "WASTEBIN_BASE_URL";
 const VAR_PASSWORD_SALT: &str = "WASTEBIN_PASSWORD_SALT";
 const VAR_HTTP_TIMEOUT: &str = "WASTEBIN_HTTP_TIMEOUT";
+const VAR_MAX_PASTE_EXPIRATION: &str = "WASTEBIN_MAX_PASTE_EXPIRATION";
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -45,29 +46,75 @@ pub enum Error {
     SigningKey(String),
     #[error("failed to parse {VAR_HTTP_TIMEOUT}: {0}")]
     HttpTimeout(ParseIntError),
+    #[error("failed to parse {VAR_MAX_PASTE_EXPIRATION}: {0}")]
+    MaxPasteExpiration(ParseIntError),
 }
 
-/// Retrieve reference to initialized metadata.
-pub fn metadata() -> &'static Metadata<'static> {
-    static DATA: OnceLock<Metadata> = OnceLock::new();
+pub struct BasePath(String);
 
-    DATA.get_or_init(|| {
-        let title = std::env::var("WASTEBIN_TITLE").unwrap_or_else(|_| "wastebin".to_string());
-        let version = env!("CARGO_PKG_VERSION");
-        let highlight = &highlight::data();
+impl BasePath {
+    pub fn path(&self) -> &str {
+        &self.0
+    }
 
-        Metadata {
-            title,
-            version,
-            highlight,
-        }
-    })
+    pub fn join(&self, s: &str) -> String {
+        let b = &self.0;
+        format!("{b}{s}")
+    }
 }
+
+impl Default for BasePath {
+    fn default() -> Self {
+        BasePath("/".to_string())
+    }
+}
+
+pub static METADATA: LazyLock<Metadata> = LazyLock::new(|| {
+    let title = std::env::var("WASTEBIN_TITLE").unwrap_or_else(|_| "wastebin".to_string());
+    let version = env!("CARGO_PKG_VERSION");
+    let highlight = &highlight::DATA;
+
+    Metadata {
+        title,
+        version,
+        highlight,
+    }
+});
+
+// NOTE: This relies on `VAR_BASE_URL` but repeats parsing to handle errors.
+pub static BASE_PATH: LazyLock<BasePath> = LazyLock::new(|| {
+    std::env::var(VAR_BASE_URL).map_or_else(
+        |err| {
+            match err {
+                VarError::NotPresent => (),
+                VarError::NotUnicode(_) => {
+                    tracing::warn!("`VAR_BASE_URL` not Unicode, defaulting to '/'");
+                }
+            };
+            BasePath::default()
+        },
+        |var| match url::Url::parse(&var) {
+            Ok(url) => {
+                let path = url.path();
+
+                if path.ends_with('/') {
+                    BasePath(path.to_string())
+                } else {
+                    BasePath(format!("{path}/"))
+                }
+            }
+            Err(err) => {
+                tracing::error!("error parsing `VAR_BASE_URL`, defaulting to '/': {err}");
+                BasePath::default()
+            }
+        },
+    )
+});
 
 pub fn cache_size() -> Result<NonZeroUsize, Error> {
     std::env::var(VAR_CACHE_SIZE)
         .map_or_else(
-            |_| Ok(NonZeroUsize::new(128).unwrap()),
+            |_| Ok(NonZeroUsize::new(128).expect("128 is non-zero")),
             |s| s.parse::<NonZeroUsize>(),
         )
         .map_err(Error::CacheSize)
@@ -130,4 +177,12 @@ pub fn http_timeout() -> Result<Duration, Error> {
             |s| s.parse::<u64>().map(|v| Duration::new(v, 0)),
         )
         .map_err(Error::HttpTimeout)
+}
+
+pub fn max_paste_expiration() -> Result<Option<NonZeroU32>, Error> {
+    std::env::var(VAR_MAX_PASTE_EXPIRATION)
+        .ok()
+        .map(|value| value.parse::<u32>().map_err(Error::MaxPasteExpiration))
+        .transpose()
+        .map(|op| op.and_then(NonZero::new))
 }

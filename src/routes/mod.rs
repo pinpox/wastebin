@@ -1,6 +1,6 @@
-use crate::pages::{Burn, Index};
+use crate::pages::Index;
 use crate::AppState;
-use axum::extract::Path;
+use axum::extract::State;
 use axum::routing::{get, Router};
 
 mod assets;
@@ -8,32 +8,38 @@ mod form;
 mod json;
 pub(crate) mod paste;
 
+async fn index<'a>(state: State<AppState>) -> Index<'a> {
+    Index::new(state.max_expiration)
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/", get(|| async { Index::default() }).post(paste::insert))
+        .route("/", get(index).post(paste::insert))
         .route(
             "/:id",
             get(paste::get).post(paste::get).delete(paste::delete),
         )
-        .route("/burn/:id", get(|Path(id)| async { Burn::new(id) }))
+        .route("/burn/:id", get(paste::burn_created))
         .route("/delete/:id", get(paste::delete))
         .merge(assets::routes())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use crate::db::write::Entry;
+    use crate::env::BASE_PATH;
     use crate::routes;
     use crate::test_helpers::{make_app, Client};
-    use http::StatusCode;
-    use reqwest::header;
+    use reqwest::{header, StatusCode};
     use serde::Serialize;
 
     #[tokio::test]
     async fn unknown_paste() -> Result<(), Box<dyn std::error::Error>> {
         let client = Client::new(make_app()?).await;
 
-        let res = client.get("/000000").send().await?;
+        let res = client.get(&BASE_PATH.join("000000")).send().await?;
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
         Ok(())
@@ -48,9 +54,10 @@ mod tests {
             extension: Some("rs".to_string()),
             expires: "0".to_string(),
             password: "".to_string(),
+            title: "".to_string(),
         };
 
-        let res = client.post("/").form(&data).send().await?;
+        let res = client.post(BASE_PATH.path()).form(&data).send().await?;
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
 
         let location = res.headers().get("location").unwrap().to_str()?;
@@ -88,6 +95,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn insert_via_form_fail() -> Result<(), Box<dyn std::error::Error>> {
+        let client = Client::new(make_app()?).await;
+
+        let mut data = HashMap::new();
+        data.insert("Hello", "World");
+
+        let res = client.post(BASE_PATH.path()).form(&data).send().await?;
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn burn_after_reading() -> Result<(), Box<dyn std::error::Error>> {
         let client = Client::new(make_app()?).await;
 
@@ -96,18 +116,19 @@ mod tests {
             extension: None,
             expires: "burn".to_string(),
             password: "".to_string(),
+            title: "".to_string(),
         };
 
-        let res = client.post("/").form(&data).send().await?;
+        let res = client.post(BASE_PATH.path()).form(&data).send().await?;
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
 
         let location = res.headers().get("location").unwrap().to_str()?;
 
-        // Location is the `/burn/foo` page not the paste itself, so ignore the prefix.
-        let location = location.split_at(5).1;
+        // Location is the `/burn/foo` page not the paste itself, so remove the prefix.
+        let location = location.replace("burn/", "");
 
         let res = client
-            .get(location)
+            .get(&location)
             .header(header::ACCEPT, "text/html; charset=utf-8")
             .send()
             .await?;
@@ -115,7 +136,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
 
         let res = client
-            .get(location)
+            .get(&location)
             .header(header::ACCEPT, "text/html; charset=utf-8")
             .send()
             .await?;
@@ -135,18 +156,19 @@ mod tests {
             extension: None,
             expires: "burn".to_string(),
             password: password.to_string(),
+            title: "".to_string(),
         };
 
-        let res = client.post("/").form(&data).send().await?;
+        let res = client.post(BASE_PATH.path()).form(&data).send().await?;
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
 
         let location = res.headers().get("location").unwrap().to_str()?;
 
-        // Location is the `/burn/foo` page not the paste itself, so ignore the prefix.
-        let location = location.split_at(5).1;
+        // Location is the `/burn/foo` page not the paste itself, so remove the prefix.
+        let location = location.replace("burn/", "");
 
         let res = client
-            .get(location)
+            .get(&location)
             .header(header::ACCEPT, "text/html; charset=utf-8")
             .send()
             .await?;
@@ -163,7 +185,7 @@ mod tests {
         };
 
         let res = client
-            .post(location)
+            .post(&location)
             .form(&data)
             .header(header::ACCEPT, "text/html; charset=utf-8")
             .send()
@@ -172,7 +194,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
 
         let res = client
-            .get(location)
+            .get(&location)
             .header(header::ACCEPT, "text/html; charset=utf-8")
             .send()
             .await?;
@@ -191,7 +213,7 @@ mod tests {
             ..Default::default()
         };
 
-        let res = client.post("/").json(&entry).send().await?;
+        let res = client.post(BASE_PATH.path()).json(&entry).send().await?;
         assert_eq!(res.status(), StatusCode::OK);
 
         let payload = res.json::<routes::json::RedirectResponse>().await?;
@@ -199,6 +221,18 @@ mod tests {
         let res = client.get(&payload.path).send().await?;
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(res.text().await?, "FooBarBaz");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insert_via_json_fail() -> Result<(), Box<dyn std::error::Error>> {
+        let client = Client::new(make_app()?).await;
+
+        let entry = "Hello World";
+
+        let res = client.post(BASE_PATH.path()).json(&entry).send().await?;
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
         Ok(())
     }
@@ -214,7 +248,7 @@ mod tests {
             ..Default::default()
         };
 
-        let res = client.post("/").json(&entry).send().await?;
+        let res = client.post(BASE_PATH.path()).json(&entry).send().await?;
         assert_eq!(res.status(), StatusCode::OK);
 
         let payload = res.json::<routes::json::RedirectResponse>().await?;
@@ -240,18 +274,33 @@ mod tests {
             extension: None,
             expires: "0".to_string(),
             password: "".to_string(),
+            title: "".to_string(),
         };
 
-        let res = client.post("/").form(&data).send().await?;
-        let uid_cookie = res.cookies().find(|cookie| cookie.name() == "uid");
-        assert!(uid_cookie.is_some());
+        let res = client.post(BASE_PATH.path()).form(&data).send().await?;
+        let uid_cookie = res.cookies().find(|cookie| cookie.name() == "uid").unwrap();
+        assert_eq!(uid_cookie.name(), "uid");
+        assert!(uid_cookie.value().len() > 40);
+        assert_eq!(uid_cookie.path(), None);
+        assert!(uid_cookie.http_only());
+        assert!(uid_cookie.same_site_strict());
+        assert!(!uid_cookie.secure());
+        assert_eq!(uid_cookie.domain(), None);
+        assert_eq!(uid_cookie.expires(), None);
+        assert_eq!(uid_cookie.max_age(), None);
+
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
 
         let location = res.headers().get("location").unwrap().to_str()?;
-        let res = client.get(&format!("/delete{location}")).send().await?;
+        let id = location.replace(BASE_PATH.path(), "");
+
+        let res = client
+            .get(&BASE_PATH.join(&format!("delete/{id}")))
+            .send()
+            .await?;
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
 
-        let res = client.get(location).send().await?;
+        let res = client.get(&BASE_PATH.join(&id)).send().await?;
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
         Ok(())
@@ -266,9 +315,10 @@ mod tests {
             extension: None,
             expires: "0".to_string(),
             password: "".to_string(),
+            title: "".to_string(),
         };
 
-        let res = client.post("/").form(&data).send().await?;
+        let res = client.post(BASE_PATH.path()).form(&data).send().await?;
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
 
         let location = res.headers().get("location").unwrap().to_str()?;

@@ -1,4 +1,7 @@
+use std::num::NonZeroU32;
+
 use crate::db::write;
+use crate::env::BASE_PATH;
 use crate::errors::{Error, JsonErrorResponse};
 use crate::id::Id;
 use crate::AppState;
@@ -11,9 +14,10 @@ use serde::{Deserialize, Serialize};
 pub struct Entry {
     pub text: String,
     pub extension: Option<String>,
-    pub expires: Option<u32>,
+    pub expires: Option<NonZeroU32>,
     pub burn_after_reading: Option<bool>,
     pub password: Option<String>,
+    pub title: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -30,6 +34,7 @@ impl From<Entry> for write::Entry {
             burn_after_reading: entry.burn_after_reading,
             uid: None,
             password: entry.password,
+            title: entry.title,
         }
     }
 }
@@ -46,9 +51,16 @@ pub async fn insert(
     .map_err(Error::from)?
     .into();
 
-    let entry: write::Entry = entry.into();
-    let path = id.to_url_path(&entry);
+    let mut entry: write::Entry = entry.into();
 
+    if let Some(max_exp) = state.max_expiration {
+        entry.expires = entry
+            .expires
+            .map_or_else(|| Some(max_exp), |value| Some(value.min(max_exp)));
+    }
+
+    let url = id.to_url_path(&entry);
+    let path = BASE_PATH.join(&url);
     state.db.insert(id, entry).await?;
 
     Ok(Json::from(RedirectResponse { path }))

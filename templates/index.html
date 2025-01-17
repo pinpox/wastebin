@@ -1,79 +1,54 @@
 {% extends "base.html" %}
 
 {% block head %}
-<script>
-  function dropHandler(ev) {
-    ev.preventDefault();
+<script defer src="{{ base_path.join("index.js") }}"></script>
+{% endblock %}
 
-    let textarea = document.getElementById('text');
-
-    if (ev.dataTransfer.items) {
-      const item = ev.dataTransfer.items[0];
-
-      if (item.kind === 'file') {
-        item.getAsFile().text().then((value) => textarea.value = value);
-      }
-    } else {
-      const item = ev.dataTransfer.files[0];
-      item.text().then((value) => textarea.value = value);
-    }
-  }
-
-  function dragOverHandler(ev) {
-    ev.preventDefault();
-  }
-
-  function filterLangs(ev) {
-    ev.preventDefault();
-    let langs = document.getElementById("langs");
-    const term = document.getElementById("filter").value.toLowerCase();
-
-    for (option of langs) {
-      if (option.innerText.toLowerCase().includes(term)) {
-        option.style.display = "";
-      }
-      else {
-        option.style.display = "none";
-      }
-    }
-  }
-</script>
+{% block nav_specific %}
+    <div class="nav-item">
+      <button id="open" class="nav-button" aria-label="upload">
+        <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24">
+          <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v9m-5 0H5a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4a1 1 0 0 0-1-1h-2M8 9l4-5 4 5m1 8h.01"/>
+        </svg>
+      </button>
+    </div>
 {% endblock %}
 
 {%- block content -%}
-    <form action="/" method="post">
+    <form id="form" action="{{ base_path.path() }}" method="post">
       <div class="container">
         <div class="content">
-          <textarea id="text" name="text" autocorrect="off" autocomplete="off" spellcheck="false" placeholder="<paste text or drop file here>" ondrop="dropHandler(event);" ondragover="dragOverHandler(event);" autofocus></textarea>
+          <textarea id="text" name="text" autocorrect="off" autocomplete="off" spellcheck="false" placeholder="<paste text or drop file here>" autofocus></textarea>
         </div>
-        <div class="extensions-list">
-          <select name="extension" id="langs" size="23">
-          {%- for syntax in meta.highlight.syntaxes -%}
-            {%- if syntax.file_extensions.len() > 0 %}
-            <option value="{{ syntax.file_extensions.first().unwrap() }}">{{ syntax.name }}</option>
-            {%- endif -%}
-          {%- endfor %}
-          </select>
-        </div>
-        <div class="extension-filter">
-          <input type="search" id="filter" placeholder="Filter ..." onchange="filterLangs(event);" onkeyup="filterLangs(event)"></input>
-        </div>
-        <div class="expiration-list">
-          <select name="expires" size="7">
-            <option selected="" value="">never</option>
-            <option value="600">10 minutes</option>
-            <option value="3600">1 hour</option>
-            <option value="86400">1 day</option>
-            <option value="604800">1 week</option>
-            <option value="215308800">1 year</option>
-            <option value="burn">🔥 after reading</option>
-          </select>
-        </div>
-        <div class="password">
-          <input type="password" name="password" id="password" placeholder="Password ..."></input>
-        </div>
-        <div class="paste-button">
-          <button type="submit" title="Paste" class="button">Paste</button>
+        <div class="controls">
+          <div class="controls-group">
+            <div class="controls-row">
+              <select class="controls-row" name="extension" id="langs" size="17">
+              {%- for syntax in meta.highlight.syntaxes -%}
+                {%- if syntax.file_extensions.len() > 0 %}
+                <option value="{{ syntax.file_extensions.first().unwrap() }}">{{ syntax.name }}</option>
+                {%- endif -%}
+              {%- endfor %}
+              </select>
+              <input class="controls-row" type="search" id="filter" placeholder="Filter ...">
+            </div>
+          </div>
+          <div class="controls-group">
+            <select name="expires" size="8">
+              {{- Self::expiry_options(self)|safe }}
+            </select>
+          </div>
+          <div class="controls-group">
+            <div class="controls-row">
+              <input type="password" name="password" id="password" placeholder="Password ...">
+            </div>
+            <div class="controls-row">
+              <input type="text" name="title" id="title" placeholder="Title ...">
+            </div>
+          </div>
+          <div class="controls-group">
+            <button type="submit" title="Paste" class="button">Paste</button>
+          </div>
         </div>
       </div>
     </form>

@@ -1,5 +1,6 @@
 use crate::cache::Cache;
 use crate::db::{self, Database};
+use crate::env::base_url;
 use axum::extract::Request;
 use axum::response::Response;
 use axum::Router;
@@ -56,12 +57,13 @@ pub(crate) fn make_app() -> Result<Router, Box<dyn std::error::Error>> {
     let db = Database::new(db::Open::Memory)?;
     let cache = Cache::new(NonZeroUsize::new(128).unwrap());
     let key = Key::generate();
-    let base_url = None;
+    let base_url = base_url().unwrap();
     let state = crate::AppState {
         db,
         cache,
         key,
         base_url,
+        max_expiration: None,
     };
 
     Ok(crate::make_app(4096, Duration::new(30, 0)).with_state(state))

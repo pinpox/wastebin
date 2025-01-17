@@ -1,9 +1,12 @@
+use std::num::NonZeroU32;
+
 use crate::db::write;
+use crate::env::BASE_PATH;
 use crate::id::Id;
 use crate::{pages, AppState, Error};
 use axum::extract::{Form, State};
 use axum::response::Redirect;
-use axum_extra::extract::cookie::{Cookie, SignedCookieJar};
+use axum_extra::extract::cookie::{Cookie, SameSite, SignedCookieJar};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -13,15 +16,17 @@ pub struct Entry {
     pub extension: Option<String>,
     pub expires: String,
     pub password: String,
+    pub title: String,
 }
 
 impl From<Entry> for write::Entry {
     fn from(entry: Entry) -> Self {
         let burn_after_reading = Some(entry.expires == "burn");
         let password = (!entry.password.is_empty()).then_some(entry.password);
+        let title = (!entry.title.is_empty()).then_some(entry.title);
 
-        let expires = match entry.expires.parse::<u32>() {
-            Ok(0) | Err(_) => None,
+        let expires = match entry.expires.parse::<NonZeroU32>() {
+            Err(_) => None,
             Ok(secs) => Some(secs),
         };
 
@@ -32,6 +37,7 @@ impl From<Entry> for write::Entry {
             burn_after_reading,
             uid: None,
             password,
+            title,
         }
     }
 }
@@ -40,6 +46,7 @@ pub async fn insert(
     state: State<AppState>,
     jar: SignedCookieJar,
     Form(entry): Form<Entry>,
+    is_https: bool,
 ) -> Result<(SignedCookieJar, Redirect), pages::ErrorResponse<'static>> {
     let id: Id = tokio::task::spawn_blocking(|| {
         let mut rng = rand::thread_rng();
@@ -62,16 +69,29 @@ pub async fn insert(
     let mut entry: write::Entry = entry.into();
     entry.uid = Some(uid);
 
-    let url = id.to_url_path(&entry);
+    let mut url = id.to_url_path(&entry);
+
     let burn_after_reading = entry.burn_after_reading.unwrap_or(false);
+    if burn_after_reading {
+        url = format!("burn/{url}");
+    }
+
+    let url_with_base = BASE_PATH.join(&url);
+
+    if let Some(max_exp) = state.max_expiration {
+        entry.expires = entry
+            .expires
+            .map_or_else(|| Some(max_exp), |value| Some(value.min(max_exp)));
+    }
 
     state.db.insert(id, entry).await?;
 
-    let jar = jar.add(Cookie::new("uid", uid.to_string()));
+    let cookie = Cookie::build(("uid", uid.to_string()))
+        .http_only(true)
+        .secure(is_https)
+        .same_site(SameSite::Strict)
+        .build();
 
-    if burn_after_reading {
-        Ok((jar, Redirect::to(&format!("/burn{url}"))))
-    } else {
-        Ok((jar, Redirect::to(&url)))
-    }
+    let jar = jar.add(cookie);
+    Ok((jar, Redirect::to(&url_with_base)))
 }

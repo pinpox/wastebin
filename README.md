@@ -16,7 +16,7 @@ A minimal pastebin with a design shamelessly copied from
 * single binary with low memory footprint
 * drag 'n' drop upload
 * deletion after expiration, reading or by owners
-* light/dark mode
+* light/dark mode according to browser settings
 * highlightable line numbers
 * QR code to browse a paste's URL on mobile devices
 * optional encryption with argon2 hashing and ChaCha20Poly1305 encryption
@@ -38,6 +38,36 @@ You can also download pre-built, statically compiled [Linux
 binaries](https://github.com/matze/wastebin/releases). After extraction run the
 contained `wastebin` binary.
 
+### Build a container image
+
+It's possible to build a container image using Docker or Podman. Assuming you're in the root directory of repository run
+```bash
+$ sudo docker build -t wastebin:v2.4.3 -f Dockerfile .
+```
+for Docker or
+```bash
+$ podman build -t wastebin:v2.4.3 -f Dockerfile
+```
+for Podman.
+
+To cross-compile, make sure that your container engine of choice supports it,
+e.g. Docker:
+
+```bash
+$ sudo docker buildx ls
+NAME/NODE     DRIVER/ENDPOINT   STATUS    BUILDKIT   PLATFORMS
+default*      docker
+ \_ default    \_ default       running   v0.14.1    linux/amd64, linux/amd64/v2, linux/386, linux/arm64, linux/riscv64, linux/ppc64, linux/ppc64le, linux/s390x, linux/mips64le, linux/mips64, linux/loong64, linux/arm/v7, linux/arm/v6
+```
+
+To build an arm64 image on an x86_64 host run
+```bash
+$ sudo docker build --platform linux/arm64 -t wastebin:v2.4.3-arm64 -f Dockerfile.arm .
+```
+or
+```bash
+$ podman build --arch=arm64 -t wastebin:v2.4.3-arm64 -f Dockerfile.arm
+```
 
 ### Run a Docker image
 
@@ -52,6 +82,7 @@ Here is how to persist the database as `state.db` via the
 shell nor with `TMPDIR` being set. If database migrations fail with an extended
 sqlite error code 6410, pass `TMPDIR` pointing to a location, sqlite can write
 to.
+
 
 ### Run with docker-compose
 ```
@@ -68,6 +99,19 @@ services:
 ```
 Make sure the `./data` folder is writable by the user 10001.
 
+
+### Run with Nix
+
+For Nix users, a `flake.nix` is also provided. Build and execute it directly
+with:
+
+```bash
+nix run 'github:matze/wastebin#wastebin'
+```
+
+Or install the provided `wastebin` package like you normally would.
+
+
 ## Usage
 
 ### Browser interface
@@ -80,6 +124,9 @@ When viewing a paste, you can use
 * <kbd>q</kbd> to display the current URL as a QR code and
 * <kbd>p</kbd> to view the formatted paste,
 * <kbd>?</kbd> to view the list of keybindings.
+
+To paste some text you can also use the <kbd>ctrl</kbd>+<kbd>s</kbd> key
+combination.
 
 
 ### Configuration
@@ -100,6 +147,8 @@ run-time behavior:
   until wastebin responds with 408, by default it is set to 5 seconds.
 * `WASTEBIN_MAX_BODY_SIZE` number of bytes to accept for POST requests. Defaults
   to 1 MB.
+* `WASTEBIN_MAX_PASTE_EXPIRATION` maximum allowed lifetime of a paste in
+  seconds. Defaults to 0 meaning unlimited.
 * `WASTEBIN_PASSWORD_SALT` salt used to hash user passwords used for encrypting
   pastes.
 * `WASTEBIN_SIGNING_KEY` sets the key to sign cookies. If not set, a random key
@@ -153,15 +202,30 @@ line using `xclip`, `curl` and `jq`. Define the following function in your
 `.bashrc` and you are good to go:
 
 ```bash
-function waste-paste() {
+function paste_from_clipboard() {
     local URL=$(\
         jq -n --arg t "$(xclip -selection clipboard -o)" '{text: $t}' | \
-        curl -s -H 'Content-Type: application/json' --data-binary @- http://0.0.0.0:8088 | \
-        jq -r '. | "http://0.0.0.0:8088\(.path)"')
+            curl -s -H 'Content-Type: application/json' --data-binary @- https://wastebin.tld | \
+            jq -r '. | "https://wastebin.tld\(.path)"')
 
     xdg-open $URL
 }
 ```
+
+### Paste from stdin
+
+To paste from stdin use the following function in your `.bashrc`:
+
+```bash
+function paste_from_stdin() {
+    jq -Rns '{text: inputs}' | \
+        curl  -s -H 'Content-Type: application/json' --data-binary @- https://wastebin.tld | \
+        jq -r '. | "wastebin.tld\(.path)"'
+}
+```
+
+It can be handy for creating pastes from logs or the output of commands, e.g.
+`cat file.log | paste_from_stdin`.
 
 
 ## License

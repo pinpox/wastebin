@@ -1,55 +1,51 @@
 use crate::crypto::Password;
 use crate::errors::Error;
 use crate::id::Id;
+use parking_lot::Mutex;
 use rusqlite::{params, Connection, Transaction};
 use rusqlite_migration::{HookError, Migrations, M};
 use std::io::Cursor;
 use std::path::PathBuf;
-use std::sync::OnceLock;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock};
 use tokio::task::spawn_blocking;
 
-fn migrations() -> &'static Migrations<'static> {
-    static MIGRATIONS: OnceLock<Migrations> = OnceLock::new();
+static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
+    Migrations::new(vec![
+        M::up(include_str!("migrations/0001-initial.sql")),
+        M::up(include_str!("migrations/0002-add-created-column.sql")),
+        M::up(include_str!(
+            "migrations/0003-drop-created-add-uid-column.sql"
+        )),
+        M::up_with_hook(
+            include_str!("migrations/0004-add-compressed-column.sql"),
+            |tx: &Transaction| {
+                let mut stmt = tx.prepare("SELECT id, text FROM entries")?;
 
-    MIGRATIONS.get_or_init(|| {
-        Migrations::new(vec![
-            M::up(include_str!("migrations/0001-initial.sql")),
-            M::up(include_str!("migrations/0002-add-created-column.sql")),
-            M::up(include_str!(
-                "migrations/0003-drop-created-add-uid-column.sql"
-            )),
-            M::up_with_hook(
-                include_str!("migrations/0004-add-compressed-column.sql"),
-                |tx: &Transaction| {
-                    let mut stmt = tx.prepare("SELECT id, text FROM entries")?;
+                let rows = stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<Result<Vec<(u32, String)>, _>>()?;
 
-                    let rows = stmt
-                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                        .collect::<Result<Vec<(u32, String)>, _>>()?;
+                tracing::debug!("compressing {} rows", rows.len());
 
-                    tracing::debug!("compressing {} rows", rows.len());
+                for (id, text) in rows {
+                    let cursor = Cursor::new(text);
+                    let data = zstd::stream::encode_all(cursor, zstd::DEFAULT_COMPRESSION_LEVEL)
+                        .map_err(|e| HookError::Hook(e.to_string()))?;
 
-                    for (id, text) in rows {
-                        let cursor = Cursor::new(text);
-                        let data =
-                            zstd::stream::encode_all(cursor, zstd::DEFAULT_COMPRESSION_LEVEL)
-                                .map_err(|e| HookError::Hook(e.to_string()))?;
+                    tx.execute(
+                        "UPDATE entries SET data = ?1 WHERE id = ?2",
+                        params![data, id],
+                    )?;
+                }
 
-                        tx.execute(
-                            "UPDATE entries SET data = ?1 WHERE id = ?2",
-                            params![data, id],
-                        )?;
-                    }
-
-                    Ok(())
-                },
-            ),
-            M::up(include_str!("migrations/0005-drop-text-column.sql")),
-            M::up(include_str!("migrations/0006-add-nonce-column.sql")),
-        ])
-    })
-}
+                Ok(())
+            },
+        ),
+        M::up(include_str!("migrations/0005-drop-text-column.sql")),
+        M::up(include_str!("migrations/0006-add-nonce-column.sql")),
+        M::up(include_str!("migrations/0007-add-title-column.sql")),
+    ])
+});
 
 /// Our main database and integrated cache.
 #[derive(Clone)]
@@ -73,6 +69,7 @@ pub mod write {
     use async_compression::tokio::bufread::ZstdEncoder;
     use serde::{Deserialize, Serialize};
     use std::io::Cursor;
+    use std::num::NonZeroU32;
     use tokio::io::{AsyncReadExt, BufReader};
 
     /// An uncompressed entry to be inserted into the database.
@@ -83,13 +80,15 @@ pub mod write {
         /// File extension
         pub extension: Option<String>,
         /// Expiration in seconds from now
-        pub expires: Option<u32>,
+        pub expires: Option<NonZeroU32>,
         /// Delete if read
         pub burn_after_reading: Option<bool>,
         /// User identifier that inserted the entry
         pub uid: Option<i64>,
         /// Optional password to encrypt the entry
         pub password: Option<String>,
+        /// Title
+        pub title: Option<String>,
     }
 
     /// A compressed entry to be inserted.
@@ -167,6 +166,8 @@ pub mod read {
         pub uid: Option<i64>,
         /// Nonce for this entry
         pub nonce: Option<Vec<u8>>,
+        /// Title
+        pub title: Option<String>,
     }
 
     /// Potentially decrypted but still compressed entry
@@ -177,6 +178,8 @@ pub mod read {
         must_be_deleted: bool,
         /// User identifier that inserted the entry
         uid: Option<i64>,
+        /// Title
+        title: Option<String>,
     }
 
     /// An entry read from the database.
@@ -187,6 +190,8 @@ pub mod read {
         pub must_be_deleted: bool,
         /// User identifier that inserted the entry
         pub uid: Option<i64>,
+        /// Title
+        pub title: Option<String>,
     }
 
     impl DatabaseEntry {
@@ -200,6 +205,7 @@ pub mod read {
                     data: self.data,
                     must_be_deleted: self.must_be_deleted,
                     uid: self.uid,
+                    title: self.title,
                 }),
                 (Some(nonce), Some(password)) => {
                     let encrypted = Encrypted::new(self.data, nonce);
@@ -208,6 +214,7 @@ pub mod read {
                         data: decrypted,
                         must_be_deleted: self.must_be_deleted,
                         uid: self.uid,
+                        title: self.title,
                     })
                 }
             }
@@ -229,6 +236,7 @@ pub mod read {
                 text,
                 uid: self.uid,
                 must_be_deleted: self.must_be_deleted,
+                title: self.title,
             })
         }
     }
@@ -244,7 +252,7 @@ impl Database {
             Open::Path(path) => Connection::open(path)?,
         };
 
-        migrations().to_latest(&mut conn)?;
+        MIGRATIONS.to_latest(&mut conn)?;
 
         let conn = Arc::new(Mutex::new(conn));
 
@@ -258,19 +266,20 @@ impl Database {
         let write::DatabaseEntry { entry, data, nonce } = entry.compress().await?.encrypt().await?;
 
         spawn_blocking(move || match entry.expires {
-            None => conn.lock().unwrap().execute(
-                "INSERT INTO entries (id, uid, data, burn_after_reading, nonce) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id, entry.uid, data, entry.burn_after_reading, nonce],
+            None => conn.lock().execute(
+                "INSERT INTO entries (id, uid, data, burn_after_reading, nonce, title) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, entry.uid, data, entry.burn_after_reading, nonce, entry.title],
             ),
-            Some(expires) => conn.lock().unwrap().execute(
-                "INSERT INTO entries (id, uid, data, burn_after_reading, nonce, expires) VALUES (?1, ?2, ?3, ?4, ?5, datetime('now', ?6))",
+            Some(expires) => conn.lock().execute(
+                "INSERT INTO entries (id, uid, data, burn_after_reading, nonce, expires, title) VALUES (?1, ?2, ?3, ?4, ?5, datetime('now', ?6), ?7)",
                 params![
                     id,
                     entry.uid,
                     data,
                     entry.burn_after_reading,
                     nonce,
-                    format!("{expires} seconds")
+                    format!("{expires} seconds"),
+                    entry.title,
                 ],
             ),
         })
@@ -285,8 +294,8 @@ impl Database {
         let id_as_u32 = id.as_u32();
 
         let entry = spawn_blocking(move || {
-            conn.lock().unwrap().query_row(
-                "SELECT data, burn_after_reading, uid, nonce, expires < datetime('now') FROM entries WHERE id=?1",
+            conn.lock().query_row(
+                "SELECT data, burn_after_reading, uid, nonce, expires < datetime('now'), title FROM entries WHERE id=?1",
                 params![id_as_u32],
                 |row| {
                     Ok(read::DatabaseEntry {
@@ -295,6 +304,7 @@ impl Database {
                         uid: row.get(2)?,
                         nonce: row.get(3)?,
                         expired: row.get::<_, Option<bool>>(4)?.unwrap_or(false),
+                        title: row.get::<_, Option<String>>(5)?,
                     })
                 },
             )
@@ -316,7 +326,7 @@ impl Database {
         let id_as_u32 = id.as_u32();
 
         let (uid, expired) = spawn_blocking(move || {
-            conn.lock().unwrap().query_row(
+            conn.lock().query_row(
                 "SELECT uid, expires < datetime('now') FROM entries WHERE id=?1",
                 params![id_as_u32],
                 |row| {
@@ -343,7 +353,6 @@ impl Database {
 
         spawn_blocking(move || {
             conn.lock()
-                .unwrap()
                 .execute("DELETE FROM entries WHERE id=?1", params![id])
         })
         .await??;
@@ -356,9 +365,7 @@ impl Database {
         let conn = self.conn.clone();
 
         let uid = spawn_blocking(move || {
-            let conn = conn.lock().unwrap();
-
-            conn.query_row(
+            conn.lock().query_row(
                 "UPDATE uids SET n = n + 1 WHERE id = 0 RETURNING n",
                 [],
                 |row| row.get(0),
@@ -372,6 +379,8 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZero;
+
     use super::*;
 
     fn new_db() -> Result<Database, Box<dyn std::error::Error>> {
@@ -407,7 +416,7 @@ mod tests {
         let db = new_db()?;
 
         let entry = write::Entry {
-            expires: Some(1),
+            expires: Some(NonZero::new(1).unwrap()),
             ..Default::default()
         };
 
