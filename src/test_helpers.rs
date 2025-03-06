@@ -1,30 +1,44 @@
 use crate::cache::Cache;
 use crate::db::{self, Database};
-use crate::env::base_url;
-use axum::extract::Request;
-use axum::response::Response;
-use axum::Router;
+use crate::expiration::ExpirationSet;
+use crate::highlight::{Highlighter, Theme};
+use crate::page;
 use axum_extra::extract::cookie::Key;
 use reqwest::RequestBuilder;
-use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tower::make::Shared;
-use tower_service::Service;
 
 pub(crate) struct Client {
     client: reqwest::Client,
     addr: SocketAddr,
 }
 
+/// Determine if the client should store cookies.
+pub(crate) struct StoreCookies(pub bool);
+
 impl Client {
-    pub(crate) async fn new<S>(svc: S) -> Self
-    where
-        S: Service<Request, Response = Response, Error = Infallible> + Clone + Send + 'static,
-        S::Future: Send,
-    {
+    pub(crate) async fn new(store_cookies: StoreCookies) -> Self {
+        let db = Database::new(db::Open::Memory).expect("open memory database");
+        let cache = Cache::new(NonZeroUsize::new(128).unwrap());
+        let key = Key::generate();
+        let expirations = "0".parse::<ExpirationSet>().unwrap();
+        let page = Arc::new(page::Page::new(
+            String::from("test"),
+            url::Url::parse("https://localhost:8888").unwrap(),
+            Theme::Ayu,
+            expirations,
+        ));
+        let state = crate::AppState {
+            db,
+            cache,
+            key,
+            page,
+            highlighter: Arc::new(Highlighter::default()),
+        };
+
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("Could not bind ephemeral socket");
@@ -32,12 +46,14 @@ impl Client {
         let addr = listener.local_addr().unwrap();
 
         tokio::spawn(async move {
-            axum::serve(listener, Shared::new(svc)).await.unwrap();
+            crate::serve(listener, state, Duration::new(30, 0), 1024 * 1024)
+                .await
+                .unwrap();
         });
 
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .cookie_store(true)
+            .cookie_store(store_cookies.0)
             .build()
             .unwrap();
 
@@ -51,20 +67,16 @@ impl Client {
     pub(crate) fn post(&self, url: &str) -> RequestBuilder {
         self.client.post(format!("http://{}{}", self.addr, url))
     }
-}
 
-pub(crate) fn make_app() -> Result<Router, Box<dyn std::error::Error>> {
-    let db = Database::new(db::Open::Memory)?;
-    let cache = Cache::new(NonZeroUsize::new(128).unwrap());
-    let key = Key::generate();
-    let base_url = base_url().unwrap();
-    let state = crate::AppState {
-        db,
-        cache,
-        key,
-        base_url,
-        max_expiration: None,
-    };
+    pub(crate) fn post_form(&self) -> RequestBuilder {
+        self.client.post(format!("http://{}/new", self.addr))
+    }
 
-    Ok(crate::make_app(4096, Duration::new(30, 0)).with_state(state))
+    pub(crate) fn post_json(&self) -> RequestBuilder {
+        self.client.post(format!("http://{}/", self.addr))
+    }
+
+    pub(crate) fn delete(&self, url: &str) -> RequestBuilder {
+        self.client.delete(format!("http://{}{}", self.addr, url))
+    }
 }

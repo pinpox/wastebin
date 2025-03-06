@@ -1,37 +1,26 @@
-use crate::{db, highlight};
+use crate::{db, expiration, highlight};
 use axum_extra::extract::cookie::Key;
 use std::env::VarError;
 use std::net::SocketAddr;
-use std::num::{NonZero, NonZeroU32, NonZeroUsize, ParseIntError};
+use std::num::{NonZeroUsize, ParseIntError};
 use std::path::PathBuf;
-use std::sync::LazyLock;
 use std::time::Duration;
-
-pub struct Metadata<'a> {
-    pub title: String,
-    pub version: &'a str,
-    pub highlight: &'a highlight::Data<'a>,
-}
 
 pub const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub const CSS_MAX_AGE: Duration = Duration::from_secs(60 * 60 * 24 * 30 * 6); // 6 month
-pub const JS_MAX_AGE: Duration = Duration::from_secs(60 * 60 * 24 * 30 * 6); // 6 month
-
-pub const FAVICON_MAX_AGE: Duration = Duration::from_secs(86400);
-
 const VAR_ADDRESS_PORT: &str = "WASTEBIN_ADDRESS_PORT";
+const VAR_BASE_URL: &str = "WASTEBIN_BASE_URL";
 const VAR_CACHE_SIZE: &str = "WASTEBIN_CACHE_SIZE";
 const VAR_DATABASE_PATH: &str = "WASTEBIN_DATABASE_PATH";
-const VAR_MAX_BODY_SIZE: &str = "WASTEBIN_MAX_BODY_SIZE";
-const VAR_SIGNING_KEY: &str = "WASTEBIN_SIGNING_KEY";
-const VAR_BASE_URL: &str = "WASTEBIN_BASE_URL";
-const VAR_PASSWORD_SALT: &str = "WASTEBIN_PASSWORD_SALT";
 const VAR_HTTP_TIMEOUT: &str = "WASTEBIN_HTTP_TIMEOUT";
-const VAR_MAX_PASTE_EXPIRATION: &str = "WASTEBIN_MAX_PASTE_EXPIRATION";
+const VAR_MAX_BODY_SIZE: &str = "WASTEBIN_MAX_BODY_SIZE";
+const VAR_PASTE_EXPIRATIONS: &str = "WASTEBIN_PASTE_EXPIRATIONS";
+const VAR_SIGNING_KEY: &str = "WASTEBIN_SIGNING_KEY";
+const VAR_THEME: &str = "WASTEBIN_THEME";
+const VAR_PASSWORD_SALT: &str = "WASTEBIN_PASSWORD_SALT";
 
 #[derive(thiserror::Error, Debug)]
-pub enum Error {
+pub(crate) enum Error {
     #[error("failed to parse {VAR_CACHE_SIZE}, expected number of elements: {0}")]
     CacheSize(ParseIntError),
     #[error("failed to parse {VAR_DATABASE_PATH}, contains non-Unicode data")]
@@ -46,70 +35,31 @@ pub enum Error {
     SigningKey(String),
     #[error("failed to parse {VAR_HTTP_TIMEOUT}: {0}")]
     HttpTimeout(ParseIntError),
-    #[error("failed to parse {VAR_MAX_PASTE_EXPIRATION}: {0}")]
-    MaxPasteExpiration(ParseIntError),
+    #[error("failed to parse {VAR_PASTE_EXPIRATIONS}: {0}")]
+    ParsePasteExpiration(#[from] expiration::Error),
+    #[error("unknown theme {0}")]
+    UnknownTheme(String),
 }
 
-pub struct BasePath(String);
-
-impl BasePath {
-    pub fn path(&self) -> &str {
-        &self.0
-    }
-
-    pub fn join(&self, s: &str) -> String {
-        let b = &self.0;
-        format!("{b}{s}")
-    }
+pub fn title() -> String {
+    std::env::var("WASTEBIN_TITLE").unwrap_or_else(|_| "wastebin".to_string())
 }
 
-impl Default for BasePath {
-    fn default() -> Self {
-        BasePath("/".to_string())
-    }
-}
-
-pub static METADATA: LazyLock<Metadata> = LazyLock::new(|| {
-    let title = std::env::var("WASTEBIN_TITLE").unwrap_or_else(|_| "wastebin".to_string());
-    let version = env!("CARGO_PKG_VERSION");
-    let highlight = &highlight::DATA;
-
-    Metadata {
-        title,
-        version,
-        highlight,
-    }
-});
-
-// NOTE: This relies on `VAR_BASE_URL` but repeats parsing to handle errors.
-pub static BASE_PATH: LazyLock<BasePath> = LazyLock::new(|| {
-    std::env::var(VAR_BASE_URL).map_or_else(
-        |err| {
-            match err {
-                VarError::NotPresent => (),
-                VarError::NotUnicode(_) => {
-                    tracing::warn!("`VAR_BASE_URL` not Unicode, defaulting to '/'");
-                }
-            };
-            BasePath::default()
-        },
-        |var| match url::Url::parse(&var) {
-            Ok(url) => {
-                let path = url.path();
-
-                if path.ends_with('/') {
-                    BasePath(path.to_string())
-                } else {
-                    BasePath(format!("{path}/"))
-                }
-            }
-            Err(err) => {
-                tracing::error!("error parsing `VAR_BASE_URL`, defaulting to '/': {err}");
-                BasePath::default()
-            }
+pub fn theme() -> Result<highlight::Theme, Error> {
+    std::env::var(VAR_THEME).map_or_else(
+        |_| Ok(highlight::Theme::Ayu),
+        |var| match var.as_str() {
+            "ayu" => Ok(highlight::Theme::Ayu),
+            "base16ocean" => Ok(highlight::Theme::Base16Ocean),
+            "coldark" => Ok(highlight::Theme::Coldark),
+            "gruvbox" => Ok(highlight::Theme::Gruvbox),
+            "monokai" => Ok(highlight::Theme::Monokai),
+            "onehalf" => Ok(highlight::Theme::Onehalf),
+            "solarized" => Ok(highlight::Theme::Solarized),
+            _ => Err(Error::UnknownTheme(var)),
         },
     )
-});
+}
 
 pub fn cache_size() -> Result<NonZeroUsize, Error> {
     std::env::var(VAR_CACHE_SIZE)
@@ -150,20 +100,30 @@ pub fn max_body_size() -> Result<usize, Error> {
         .map_err(Error::MaxBodySize)
 }
 
-pub fn base_url() -> Result<Option<url::Url>, Error> {
-    let result = std::env::var(VAR_BASE_URL).map_or_else(
-        |err| match err {
-            VarError::NotPresent => Ok(None),
-            VarError::NotUnicode(_) => Err(Error::BaseUrl("Not Unicode".to_string())),
+/// Read base URL either from the environment variable or fallback to the hostname.
+pub fn base_url() -> Result<url::Url, Error> {
+    if let Some(base_url) = std::env::var(VAR_BASE_URL).map_or_else(
+        |err| {
+            if matches!(err, VarError::NotUnicode(_)) {
+                Err(Error::BaseUrl(format!("{VAR_BASE_URL} is not unicode")))
+            } else {
+                Ok(None)
+            }
         },
         |var| {
             Ok(Some(
                 url::Url::parse(&var).map_err(|err| Error::BaseUrl(err.to_string()))?,
             ))
         },
-    )?;
+    )? {
+        return Ok(base_url);
+    }
 
-    Ok(result)
+    let hostname =
+        hostname::get().map_err(|err| Error::BaseUrl(format!("failed to get hostname: {err}")))?;
+
+    url::Url::parse(&format!("https://{}", hostname.to_string_lossy()))
+        .map_err(|err| Error::BaseUrl(err.to_string()))
 }
 
 pub fn password_hash_salt() -> String {
@@ -179,10 +139,12 @@ pub fn http_timeout() -> Result<Duration, Error> {
         .map_err(Error::HttpTimeout)
 }
 
-pub fn max_paste_expiration() -> Result<Option<NonZeroU32>, Error> {
-    std::env::var(VAR_MAX_PASTE_EXPIRATION)
-        .ok()
-        .map(|value| value.parse::<u32>().map_err(Error::MaxPasteExpiration))
-        .transpose()
-        .map(|op| op.and_then(NonZero::new))
+/// Parse [`expiration::ExpirationSet`] from environment or return default.
+pub fn expiration_set() -> Result<expiration::ExpirationSet, Error> {
+    let set = std::env::var(VAR_PASTE_EXPIRATIONS).map_or_else(
+        |_| "0,600,3600=d,86400,604800,2419200,29030400".parse::<expiration::ExpirationSet>(),
+        |value| value.parse::<expiration::ExpirationSet>(),
+    )?;
+
+    Ok(set)
 }

@@ -3,6 +3,63 @@
 ## Unreleased
 
 
+## 3.0.0
+
+**2025-03-05**
+
+### Added
+
+- `WASTEBIN_THEME` configuration key to change the default theme from `ayu` to
+  `base16ocean`, `coldark`, `gruvbox`, `monokai`, `onehalf` or `solarized`.
+- UI button to switch between light and dark mode and cookie to store the
+  preference. By default the system setting is used.
+- UI button and <kbd>c</kbd> to copy content to clipboard. Thanks @limitcool.
+
+### Changed
+
+- **Breaking**: From now on, `WASTEBIN_BASE_URL` is only used for the QR code
+  link but not for internal routing. Use a dedicated proxy server to do that if
+  necessary.
+- **Breaking**: Always return HTML on `/:id` even if `text/html` is not in the
+  Accept header. Use the `/raw/:id` endpoint to retrieve raw text.
+- **Breaking**: Replace `WASTEBIN_MAX_PASTE_EXPIRATION` with a customizable set
+  of expirations via the `WASTEBIN_PASTE_EXPIRATIONS` variable.
+- Use the [two-face](https://docs.rs/two-face) crate for an extended syntax
+  list.
+- Use 64-bit integers that render as 11-character identifier from now on.
+  Existing 32-bit/6-character identifiers continue to work. Based on a PR #71 by
+  @cgzones.
+- Use title as downloaded filename instead of identifier if one is available.
+- Serve all CSS assets under hashed URL to avoid caching issues and set
+  cache-control header to one month and the `immutable` attribute.
+- Do not offer any interactions for burn-after-reading pastes that will end up
+  with a 404 anyway.
+
+### Fixed
+
+- Sort syntax list in case insensitive manner.
+- Wrong background color for inline code in Markdown.
+
+
+## 2.7.1
+
+**2025-01-24**
+
+### Changed
+
+- Select extension based on the filename.
+- Serve Javascript under hashed URL to avoid caching issues.
+- Use same six month maximum age cache control for all assets.
+- Show nicer error pages for some middleware layer issues instead of plain text
+  responses.
+
+### Fixed
+
+- Actually respect `WASTEBIN_MAX_BODY_SIZE`.
+- Allow selection of title.
+- QR code overflowing content.
+
+
 ## 2.7.0
 
 **2025-01-15**
@@ -16,7 +73,7 @@
 - Pre-fill the title box when uploading a local file.
 - Optimize code for minor performance improvements.
 
-### Fix
+### Fixed
 
 - Include extension in the QR code link.
 

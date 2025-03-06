@@ -1,6 +1,7 @@
 # <img width="24px" height="24px" style="position: relative; top: 2px;" src="assets/favicon.png"/> wastebin
-
 [![Rust](https://github.com/matze/wastebin/actions/workflows/rust.yml/badge.svg)](https://github.com/matze/wastebin/actions/workflows/rust.yml)
+
+## <strong><a href="https://war.ukraine.ua/support-ukraine/">support 🇺🇦</a> • <a href="https://state-of-the-union.ec.europa.eu/state-union-2022/state-union-achievements/defending-eu-values_en">defend 🇪🇺</a></strong>
 
 A minimal pastebin with a design shamelessly copied from
 [bin](https://github.com/WantGuns/bin).
@@ -9,24 +10,33 @@ A minimal pastebin with a design shamelessly copied from
 
 <p align="center"><strong><a href="https://bin.bloerg.net">DEMO</a></strong> (resets every day)</p>
 
+You are reading the documentation for an **unreleased version**. You can refer
+to earlier versions here: [2.7.1](https://github.com/matze/wastebin/tree/85a519ef9079c4618f851cce575b5a84334a6f42) • [3.0.0](https://github.com/matze/wastebin/tree/14a30bb540110e76da6a6045cd0e83fd2218cdd7)
+
 
 ## Features
 
-* axum and sqlite3 backend storing compressed paste data
-* single binary with low memory footprint
-* drag 'n' drop upload
-* deletion after expiration, reading or by owners
-* light/dark mode according to browser settings
-* highlightable line numbers
-* QR code to browse a paste's URL on mobile devices
-* optional encryption with argon2 hashing and ChaCha20Poly1305 encryption
+* [axum](https://github.com/tokio-rs/axum) and [sqlite3](https://www.sqlite.org) backend
+* comes as a single binary with low memory footprint
+* compresses pastes using [zstd](https://github.com/facebook/zstd)
+* highlights entries with [syntect](https://github.com/trishume/syntect)
+* has seven color themes in light and dark mode
+* encrypts entries using ChaCha20Poly1305 and argon2 hashed passwords
+* allows deletion after expiration, after reading or by anonymous owners
+* shows QR code to browse a paste's URL on mobile devices
+
+### Non-features
+
+* user authentication and admin functionality
+* arbitrary file uploads
+* mitigations for all kinds of DoS attack vectors
 
 
 ## Installation
 
 ### Build from source
 
-Install a Rust 2021 toolchain containing Rust 1.70 with
+Install a Rust 2024 toolchain containing Rust 1.85 with
 [rustup](https://rustup.rs) and run the server binary with
 
     $ cargo run --release
@@ -38,15 +48,16 @@ You can also download pre-built, statically compiled [Linux
 binaries](https://github.com/matze/wastebin/releases). After extraction run the
 contained `wastebin` binary.
 
+
 ### Build a container image
 
 It's possible to build a container image using Docker or Podman. Assuming you're in the root directory of repository run
 ```bash
-$ sudo docker build -t wastebin:v2.4.3 -f Dockerfile .
+$ sudo docker build -t wastebin:v3.0.0 -f Dockerfile .
 ```
 for Docker or
 ```bash
-$ podman build -t wastebin:v2.4.3 -f Dockerfile
+$ podman build -t wastebin:v3.0.0 -f Dockerfile
 ```
 for Podman.
 
@@ -62,11 +73,11 @@ default*      docker
 
 To build an arm64 image on an x86_64 host run
 ```bash
-$ sudo docker build --platform linux/arm64 -t wastebin:v2.4.3-arm64 -f Dockerfile.arm .
+$ sudo docker build --platform linux/arm64 -t wastebin:v3.0.0-arm64 -f Dockerfile.arm .
 ```
 or
 ```bash
-$ podman build --arch=arm64 -t wastebin:v2.4.3-arm64 -f Dockerfile.arm
+$ podman build --arch=arm64 -t wastebin:v3.0.0-arm64 -f Dockerfile.arm
 ```
 
 ### Run a Docker image
@@ -85,10 +96,11 @@ to.
 
 
 ### Run with docker-compose
-```
-version: '3.3'
+
+```yaml
 services:
   wastebin:
+    restart: always
     environment:
       - WASTEBIN_DATABASE_PATH=/data/state.db
     ports:
@@ -121,8 +133,9 @@ When viewing a paste, you can use
 * <kbd>r</kbd> to view the raw paste,
 * <kbd>n</kbd> to go the index page,
 * <kbd>y</kbd> to copy the current URL to the clipboard,
-* <kbd>q</kbd> to display the current URL as a QR code and
-* <kbd>p</kbd> to view the formatted paste,
+* <kbd>c</kbd> to copy the content to the clipboard,
+* <kbd>q</kbd> to display the current URL as a QR code,
+* <kbd>p</kbd> to view the formatted paste and
 * <kbd>?</kbd> to view the list of keybindings.
 
 To paste some text you can also use the <kbd>ctrl</kbd>+<kbd>s</kbd> key
@@ -134,30 +147,20 @@ combination.
 The following environment variables can be set to configure the server and
 run-time behavior:
 
-* `WASTEBIN_ADDRESS_PORT` string that determines which address and port to bind
-  a. If not set, it binds by default to `0.0.0.0:8088`.
-* `WASTEBIN_BASE_URL` string that determines the base URL for the QR code
-  display. If not set, the user agent's `Host` header field is used as an
-  approximation.
-* `WASTEBIN_CACHE_SIZE` number of rendered syntax highlight items to cache.
-  Defaults to 128 and can be disabled by setting to 0.
-* `WASTEBIN_DATABASE_PATH` path to the sqlite3 database file. If not set, an
-  in-memory database is used.
-* `WASTEBIN_HTTP_TIMEOUT` maximum number of seconds a request can be processed
-  until wastebin responds with 408, by default it is set to 5 seconds.
-* `WASTEBIN_MAX_BODY_SIZE` number of bytes to accept for POST requests. Defaults
-  to 1 MB.
-* `WASTEBIN_MAX_PASTE_EXPIRATION` maximum allowed lifetime of a paste in
-  seconds. Defaults to 0 meaning unlimited.
-* `WASTEBIN_PASSWORD_SALT` salt used to hash user passwords used for encrypting
-  pastes.
-* `WASTEBIN_SIGNING_KEY` sets the key to sign cookies. If not set, a random key
-  will be generated which means cookies will become invalid after restarts and
-  paste creators will not be able to delete their pastes anymore.
-* `WASTEBIN_TITLE` overrides the HTML page title. Defaults to `wastebin`.
-* `RUST_LOG` influences logging. Besides the typical `trace`, `debug`, `info`
-  etc. keys, you can also set the `tower_http` key to some log level to get
-  additional information request and response logs.
+| Variable                          | Description                                                   | Default               |
+| --------------------------------- | ------------------------------------------------------------- | --------------------- |
+| `WASTEBIN_ADDRESS_PORT`           | Address and port to bind the server to.                       | `0.0.0.0:8088`        |
+| `WASTEBIN_BASE_URL`               | Base URL for the QR code display.                             |                       |
+| `WASTEBIN_CACHE_SIZE`             | Number of rendered items to cache. Disable with 0.            | `128`                 |
+| `WASTEBIN_DATABASE_PATH`          | Path to the sqlite3 database file.                            | `:memory:`            |
+| `WASTEBIN_HTTP_TIMEOUT`           | Maximum number of seconds a request is processed until wastebin responds with 408. | `5` |
+| `WASTEBIN_MAX_BODY_SIZE`          | Number of bytes to accept for POST requests.                  | `1048576`, i.e. 1 MB  |
+| `WASTEBIN_PASSWORD_SALT`          | Salt used to hash user passwords used for encrypting pastes.  | `somesalt`            |
+| `WASTEBIN_PASTE_EXPIRATIONS`      | Possible paste expirations as a comma-separated list of seconds. Appending `=d` to one of the value makes it the default selection. | `0,600,3600=d,86400,604800,2419200,29030400` |
+| `WASTEBIN_SIGNING_KEY`            | Key to sign cookies. Must be at least 64 bytes long.          | Random key generated at startup, i.e. cookies will become invalid after restarts and paste creators will not be able to delete their pastes. |
+| `WASTEBIN_THEME`                  | Theme colors, one of `ayu`, `base16ocean`, `coldark`, `gruvbox`, `monokai`, `onehalf`, `solarized`. | `ayu` |
+| `WASTEBIN_TITLE`                  | HTML page title.                                              | `wastebin`            |
+| `RUST_LOG`                        | Log level. Besides the typical `trace`, `debug`, `info` etc. keys, you can also set the `tower_http` key to a log level to get additional request and response logs. |  |
 
 
 ### API endpoints
@@ -168,24 +171,25 @@ POST a new paste to the `/` endpoint with the following JSON payload:
 {
   "text": "<paste content>",
   "extension": "<file extension, optional>",
+  "title": "<paste title, optional>",
   "expires": <number of seconds from now, optional>,
-  "burn_after_reading": <true/false, optional>
+  "burn_after_reading": <true/false, optional>,
+  "password": <password for encryption optional>,
 }
 ```
 
 After successful insertion, you will receive a JSON response with the path to
-the newly created paste:
+the newly created paste for the browser:
 
-```
+```json
 {"path":"/Ibv9Fa.rs"}
 ```
 
-To retrieve the raw content, make a GET request on the `/:id` route and an
-accept header value that does not include `text/html`. If you use a client that
-is able to handle cookies you can delete the paste once again using the cookie
-in the `Set-Cookie` header set during redirect after creation.
+To retrieve the raw content, make a GET request on the `/raw/:id` route. If you
+use a client that is able to handle cookies you make a DELETE request on `/:id`
+using the cookie in the `Set-Cookie` header set during redirect after creation.
 
-In case the paste was encrypted, pass the password via the `Wastebin-Password`
+In case the paste was encrypted, pass the password via the `wastebin-password`
 header.
 
 
@@ -205,7 +209,7 @@ line using `xclip`, `curl` and `jq`. Define the following function in your
 function paste_from_clipboard() {
     local URL=$(\
         jq -n --arg t "$(xclip -selection clipboard -o)" '{text: $t}' | \
-            curl -s -H 'Content-Type: application/json' --data-binary @- https://wastebin.tld | \
+            curl -s -H 'Content-Type: application/json' --data-binary @- https://wastebin.tld/api | \
             jq -r '. | "https://wastebin.tld\(.path)"')
 
     xdg-open $URL
@@ -219,7 +223,7 @@ To paste from stdin use the following function in your `.bashrc`:
 ```bash
 function paste_from_stdin() {
     jq -Rns '{text: inputs}' | \
-        curl  -s -H 'Content-Type: application/json' --data-binary @- https://wastebin.tld | \
+        curl  -s -H 'Content-Type: application/json' --data-binary @- https://wastebin.tld/api | \
         jq -r '. | "wastebin.tld\(.path)"'
 }
 ```

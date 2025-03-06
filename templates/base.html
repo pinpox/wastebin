@@ -2,22 +2,29 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="generator" content="wastebin {{ meta.version }}">
+    <meta name="generator" content="wastebin {{ page.version }}">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>{{ meta.title }}{% block title_content %}{% endblock %}</title>
-    <link rel="preload" as="style" href="dark.css">
-    <link rel="preload" as="style" href="light.css">
-    <link rel="stylesheet" href="{{ base_path.join(meta.highlight.style.name) }}">
-    <link rel="icon" href="{{ base_path.join("favicon.ico") }}" type="image/png">
+    <title>{{ page.title }}{% block title_content %}{% endblock %}</title>
+    {% match theme %}
+      {% when Some with (Theme::Dark) %}
+        <link rel="stylesheet" href="{{ page.assets.css.dark.route() }}">
+      {% when Some with (Theme::Light) %}
+        <link rel="stylesheet" href="{{ page.assets.css.light.route() }}">
+      {% when None %}
+        <link rel="stylesheet" href="{{ page.assets.css.dark.route() }}" media="(prefers-color-scheme: dark)">
+        <link rel="stylesheet" href="{{ page.assets.css.light.route() }}" media="(prefers-color-scheme: light)">
+    {% endmatch %}
+    <link rel="stylesheet" href="{{ page.assets.css.style.route() }}">
+    <link rel="icon" href="{{ page.assets.favicon.route() }}" type="image/png">
+    <script defer src="{{ page.assets.base_js.route()}}"></script>
     {% block head %}{% endblock %}
   </head>
   <body>
-    {% block body_top %}{% endblock %}
     <div id="main-container">
       <header>
         <div class="nav-group">
-          <div id="nav-item">
-            <a href="{{ base_path.path() }}" class="nav-button" title="home" aria-label="home">
+          <div class="nav-item">
+            <a href="/" class="nav-button" title="home" aria-label="home">
               <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24">
                 <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m4 12 8-8 8 8M6 10.5V19a1 1 0 0 0 1 1h3v-3a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v3h3a1 1 0 0 0 1-1v-8.5"/>
               </svg>
@@ -25,14 +32,31 @@
           </div>
           {% block title %}{% endblock %}
         </div>
-        <div class="nav-group">
+        <div class="nav-group" id="nav-group-actions">
           {% block nav_common %}{% endblock %}
           {% block nav_specific %}{% endblock %}
+          <div class="nav-item" id="dark-switch">
+            <a href="/theme?pref=dark" class="nav-button" title="switch to dark" aria-label="switch to dark">
+              <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24">
+                <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 21a9 9 0 0 1-.5-17.986V3c-.354.966-.5 1.911-.5 3a9 9 0 0 0 9 9c.239 0 .254.018.488 0A9.004 9.004 0 0 1 12 21Z"/>
+              </svg>
+            </a>
+          </div>
+          <div class="nav-item" id="light-switch">
+            <a href="/theme?pref=light" class="nav-button" title="switch to light" aria-label="switch to light">
+              <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24">
+                <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5V3m0 18v-2M7.05 7.05 5.636 5.636m12.728 12.728L16.95 16.95M5 12H3m18 0h-2M7.05 16.95l-1.414 1.414M18.364 5.636 16.95 7.05M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z"/>
+              </svg>
+            </a>
+          </div>
         </div>
       </header>
       <main>
         {% block content %}{% endblock %}
       </main>
+    </div>
+    <div id="toast" class="toast hidden">
+      Copied content
     </div>
   </body>
 </html>

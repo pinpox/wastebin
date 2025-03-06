@@ -1,10 +1,10 @@
-use axum::http::StatusCode;
 use axum::Json;
+use axum::http::StatusCode;
 use serde::Serialize;
 use std::num::TryFromIntError;
 
 #[derive(thiserror::Error, Debug)]
-pub enum Error {
+pub(crate) enum Error {
     #[error("axum http error: {0}")]
     Axum(#[from] axum::http::Error),
     #[error("not allowed to delete")]
@@ -29,12 +29,8 @@ pub enum Error {
     SyntaxHighlighting(#[from] syntect::Error),
     #[error("syntax parsing error: {0}")]
     SyntaxParsing(#[from] syntect::parsing::ParsingError),
-    #[error("could not parse cookie: {0}")]
-    CookieParsing(String),
     #[error("could not generate QR code: {0}")]
     QrCode(#[from] qrcodegen::DataTooLong),
-    #[error("could not find Host header to generate QR code URL")]
-    NoHost,
     #[error("could not parse URL: {0}")]
     UrlParsing(#[from] url::ParseError),
     #[error("argon2 error: {0}")]
@@ -48,23 +44,21 @@ pub enum Error {
 }
 
 #[derive(Serialize)]
-pub struct JsonError {
+pub(crate) struct JsonError {
     pub message: String,
 }
 
 /// Response carrying a status code and the error message as JSON.
-pub type JsonErrorResponse = (StatusCode, Json<JsonError>);
+pub(crate) type JsonErrorResponse = (StatusCode, Json<JsonError>);
 
 impl From<Error> for StatusCode {
     fn from(err: Error) -> Self {
         match err {
             Error::NotFound => StatusCode::NOT_FOUND,
-            Error::NoHost
-            | Error::IllegalCharacters
+            Error::IllegalCharacters
             | Error::WrongSize
             | Error::UrlParsing(_)
-            | Error::NoPassword
-            | Error::CookieParsing(_) => StatusCode::BAD_REQUEST,
+            | Error::NoPassword => StatusCode::BAD_REQUEST,
             Error::Join(_)
             | Error::QrCode(_)
             | Error::Compression(_)

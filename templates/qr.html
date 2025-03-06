@@ -2,7 +2,7 @@
 
 {% block nav_specific %}
     <div class="nav-item">
-      <a href="{{ base_path.join(id) }}.{{ ext }}" class="nav-button" title="paste content" aria-label="paste content">
+      <a href="../{{ key }}" class="nav-button" title="paste content" aria-label="paste content">
         <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24">
           <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 3v4a1 1 0 0 1-1 1H5m4 8h6m-6-4h6m4-8v16a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7.914a1 1 0 0 1 .293-.707l3.914-3.914A1 1 0 0 1 9.914 3H18a1 1 0 0 1 1 1Z"/>
         </svg>
@@ -11,7 +11,7 @@
 {% endblock %}
 
 {% block content %}
-  <div class="center">
+  <div class="flex-center">
     <svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 {{ code.size() + 4 }} {{ code.size() + 4 }}" stroke="none" width="16rem">
       <rect width="100%" height="100%" fill="#fafafa"/>
       <path d="{% for (x, y) in self.dark_modules() %}M{{ x + 2 }},{{ y + 2 }}h1v1h-1z {% endfor %}" fill="#000000"/>

@@ -2,8 +2,8 @@ use crate::crypto::Password;
 use crate::errors::Error;
 use crate::id::Id;
 use parking_lot::Mutex;
-use rusqlite::{params, Connection, Transaction};
-use rusqlite_migration::{HookError, Migrations, M};
+use rusqlite::{Connection, Transaction, params};
+use rusqlite_migration::{HookError, M, Migrations};
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
@@ -49,13 +49,13 @@ static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
 
 /// Our main database and integrated cache.
 #[derive(Clone)]
-pub struct Database {
+pub(crate) struct Database {
     conn: Arc<Mutex<Connection>>,
 }
 
 /// Database opening modes
 #[derive(Debug)]
-pub enum Open {
+pub(crate) enum Open {
     /// Open in-memory database that is wiped after reload
     Memory,
     /// Open database from given path
@@ -63,7 +63,7 @@ pub enum Open {
 }
 
 /// Module with types for insertion.
-pub mod write {
+pub(crate) mod write {
     use crate::crypto::{Encrypted, Password, Plaintext};
     use crate::errors::Error;
     use async_compression::tokio::bufread::ZstdEncoder;
@@ -74,7 +74,7 @@ pub mod write {
 
     /// An uncompressed entry to be inserted into the database.
     #[derive(Default, Debug, Serialize, Deserialize)]
-    pub struct Entry {
+    pub(crate) struct Entry {
         /// Content
         pub text: String,
         /// File extension
@@ -92,7 +92,7 @@ pub mod write {
     }
 
     /// A compressed entry to be inserted.
-    pub struct CompressedEntry {
+    pub(crate) struct CompressedEntry {
         /// Original data
         entry: Entry,
         /// Compressed data
@@ -100,7 +100,7 @@ pub mod write {
     }
 
     /// An entry that might be encrypted.
-    pub struct DatabaseEntry {
+    pub(crate) struct DatabaseEntry {
         /// Original data
         pub entry: Entry,
         /// Compressed and potentially encrypted data
@@ -131,8 +131,8 @@ pub mod write {
             let (data, nonce) = if let Some(password) = &self.entry.password {
                 let password = Password::from(password.as_bytes().to_vec());
                 let plaintext = Plaintext::from(self.data);
-                let encrypted = Encrypted::encrypt(password, plaintext).await?;
-                (encrypted.ciphertext, Some(encrypted.nonce))
+                let Encrypted { ciphertext, nonce } = plaintext.encrypt(password).await?;
+                (ciphertext, Some(nonce))
             } else {
                 (self.data, None)
             };
@@ -147,7 +147,7 @@ pub mod write {
 }
 
 /// Module with types for reading from the database.
-pub mod read {
+pub(crate) mod read {
     use crate::crypto::{Encrypted, Password};
     use crate::errors::Error;
     use async_compression::tokio::bufread::ZstdDecoder;
@@ -155,7 +155,8 @@ pub mod read {
     use tokio::io::{AsyncReadExt, BufReader};
 
     /// A raw entry as read from the database.
-    pub struct DatabaseEntry {
+    #[derive(Debug)]
+    pub(crate) struct DatabaseEntry {
         /// Compressed and potentially encrypted data
         pub data: Vec<u8>,
         /// Entry is expired
@@ -171,7 +172,8 @@ pub mod read {
     }
 
     /// Potentially decrypted but still compressed entry
-    pub struct CompressedReadEntry {
+    #[derive(Debug)]
+    pub(crate) struct CompressedReadEntry {
         /// Compressed data
         data: Vec<u8>,
         /// Entry must be deleted
@@ -182,16 +184,39 @@ pub mod read {
         title: Option<String>,
     }
 
-    /// An entry read from the database.
-    pub struct Entry {
+    /// Uncompressed entry
+    #[derive(Debug)]
+    pub(crate) struct UmcompressedEntry {
         /// Content
         pub text: String,
-        /// Delete if read
+        /// Entry must be deleted
         pub must_be_deleted: bool,
         /// User identifier that inserted the entry
         pub uid: Option<i64>,
         /// Title
         pub title: Option<String>,
+    }
+
+    /// Uncompressed, decrypted data read from the database.
+    #[derive(Debug)]
+    pub(crate) struct Data {
+        /// Content
+        pub text: String,
+        /// User identifier that inserted the entry
+        pub uid: Option<i64>,
+        /// Title
+        pub title: Option<String>,
+    }
+
+    /// Potentially deleted or non-existent expired entry.
+    #[derive(Debug)]
+    pub(crate) enum Entry {
+        /// Entry found and still available.
+        Regular(Data),
+        /// Entry burned.
+        Burned(Data),
+        /// Entry expired.
+        Expired,
     }
 
     impl DatabaseEntry {
@@ -222,7 +247,7 @@ pub mod read {
     }
 
     impl CompressedReadEntry {
-        pub async fn decompress(self) -> Result<Entry, Error> {
+        pub async fn decompress(self) -> Result<UmcompressedEntry, Error> {
             let reader = BufReader::new(Cursor::new(self.data));
             let mut decoder = ZstdDecoder::new(reader);
             let mut text = String::new();
@@ -232,7 +257,7 @@ pub mod read {
                 .await
                 .map_err(|e| Error::Compression(e.to_string()))?;
 
-            Ok(Entry {
+            Ok(UmcompressedEntry {
                 text,
                 uid: self.uid,
                 must_be_deleted: self.must_be_deleted,
@@ -262,18 +287,17 @@ impl Database {
     /// Insert `entry` under `id` into the database and optionally set owner to `uid`.
     pub async fn insert(&self, id: Id, entry: write::Entry) -> Result<(), Error> {
         let conn = self.conn.clone();
-        let id = id.as_u32();
         let write::DatabaseEntry { entry, data, nonce } = entry.compress().await?.encrypt().await?;
 
         spawn_blocking(move || match entry.expires {
             None => conn.lock().execute(
                 "INSERT INTO entries (id, uid, data, burn_after_reading, nonce, title) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![id, entry.uid, data, entry.burn_after_reading, nonce, entry.title],
+                params![id.to_i64(), entry.uid, data, entry.burn_after_reading, nonce, entry.title],
             ),
             Some(expires) => conn.lock().execute(
                 "INSERT INTO entries (id, uid, data, burn_after_reading, nonce, expires, title) VALUES (?1, ?2, ?3, ?4, ?5, datetime('now', ?6), ?7)",
                 params![
-                    id,
+                    id.to_i64(),
                     entry.uid,
                     data,
                     entry.burn_after_reading,
@@ -291,12 +315,11 @@ impl Database {
     /// Get entire entry for `id`.
     pub async fn get(&self, id: Id, password: Option<Password>) -> Result<read::Entry, Error> {
         let conn = self.conn.clone();
-        let id_as_u32 = id.as_u32();
 
         let entry = spawn_blocking(move || {
             conn.lock().query_row(
                 "SELECT data, burn_after_reading, uid, nonce, expires < datetime('now'), title FROM entries WHERE id=?1",
-                params![id_as_u32],
+                params![id.to_i64()],
                 |row| {
                     Ok(read::DatabaseEntry {
                         data: row.get(0)?,
@@ -313,51 +336,80 @@ impl Database {
 
         if entry.expired {
             self.delete(id).await?;
-            return Err(Error::NotFound);
+            return Ok(read::Entry::Expired);
         }
 
-        entry.decrypt(password).await?.decompress().await
+        let entry = entry.decrypt(password).await?.decompress().await?;
+
+        let data = read::Data {
+            text: entry.text,
+            title: entry.title,
+            uid: entry.uid,
+        };
+
+        if entry.must_be_deleted {
+            self.delete(id).await?;
+            return Ok(read::Entry::Burned(data));
+        }
+
+        Ok(read::Entry::Regular(data))
     }
 
-    /// Get optional `uid` for `id` if it exists but error with `Error::NotFound` if `id` is
-    /// expired or does not exist.
-    pub async fn get_uid(&self, id: Id) -> Result<Option<i64>, Error> {
+    /// Get title of a paste.
+    pub async fn get_title(&self, id: Id) -> Result<Option<String>, Error> {
         let conn = self.conn.clone();
-        let id_as_u32 = id.as_u32();
 
-        let (uid, expired) = spawn_blocking(move || {
+        let title = spawn_blocking(move || {
             conn.lock().query_row(
-                "SELECT uid, expires < datetime('now') FROM entries WHERE id=?1",
-                params![id_as_u32],
-                |row| {
-                    let uid: Option<i64> = row.get(0)?;
-                    let expired: Option<bool> = row.get(1)?;
-                    Ok((uid, expired))
-                },
+                "SELECT title FROM entries WHERE id=?1",
+                params![id.to_i64()],
+                |row| row.get(0),
             )
         })
         .await??;
 
-        if expired.unwrap_or(false) {
-            self.delete(id).await?;
-            return Err(Error::NotFound);
-        }
-
-        Ok(uid)
+        Ok(title)
     }
 
-    /// Delete `id`.
-    pub async fn delete(&self, id: Id) -> Result<(), Error> {
+    /// Delete paste with `id`.
+    async fn delete(&self, id: Id) -> Result<(), Error> {
         let conn = self.conn.clone();
-        let id = id.as_u32();
 
         spawn_blocking(move || {
             conn.lock()
-                .execute("DELETE FROM entries WHERE id=?1", params![id])
+                .execute("DELETE FROM entries WHERE id=?1", params![id.to_i64()])
         })
         .await??;
 
         Ok(())
+    }
+
+    /// Delete paste with `id` for user `uid`.
+    pub async fn delete_for(&self, id: Id, uid: i64) -> Result<(), Error> {
+        let conn = self.conn.clone();
+
+        let exists: Option<i64> = spawn_blocking(move || {
+            let mut conn = conn.lock();
+            let tx = conn.transaction()?;
+
+            let exists = tx.query_row(
+                "SELECT 1 FROM entries WHERE (id=?1 AND uid=?2)",
+                params![id.to_i64(), uid],
+                |row| Ok(row.get(0)),
+            )?;
+
+            tx.execute(
+                "DELETE FROM entries WHERE (id=?1 AND uid=?2)",
+                params![id.to_i64(), uid],
+            )?;
+
+            tx.commit()?;
+
+            exists
+        })
+        .await??;
+
+        exists.map(|_| ()).ok_or(Error::Delete)
     }
 
     /// Retrieve next monotonically increasing uid.
@@ -383,6 +435,17 @@ mod tests {
 
     use super::*;
 
+    impl read::Entry {
+        /// Unwrap inner data or panic.
+        pub fn unwrap_inner(self) -> read::Data {
+            match self {
+                read::Entry::Regular(data) => data,
+                read::Entry::Burned(data) => data,
+                read::Entry::Expired => panic!("no data"),
+            }
+        }
+    }
+
     fn new_db() -> Result<Database, Box<dyn std::error::Error>> {
         Ok(Database::new(Open::Memory)?)
     }
@@ -397,15 +460,15 @@ mod tests {
             ..Default::default()
         };
 
-        let id = Id::from(1234);
+        let id = Id::from(1234u32);
         db.insert(id, entry).await?;
 
-        let entry = db.get(id, None).await?;
+        let entry = db.get(id, None).await?.unwrap_inner();
         assert_eq!(entry.text, "hello world");
         assert!(entry.uid.is_some());
         assert_eq!(entry.uid.unwrap(), 10);
 
-        let result = db.get(Id::from(5678), None).await;
+        let result = db.get(Id::from(5678u32), None).await;
         assert!(result.is_err());
 
         Ok(())
@@ -420,14 +483,13 @@ mod tests {
             ..Default::default()
         };
 
-        let id = Id::from(1234);
+        let id = Id::from(1234u32);
         db.insert(id, entry).await?;
 
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
         let result = db.get(id, None).await;
-        assert!(result.is_err());
-        assert!(matches!(result.err().unwrap(), Error::NotFound));
+        assert!(matches!(result, Ok(read::Entry::Expired)));
 
         Ok(())
     }
@@ -436,7 +498,7 @@ mod tests {
     async fn delete() -> Result<(), Box<dyn std::error::Error>> {
         let db = new_db()?;
 
-        let id = Id::from(1234);
+        let id = Id::from(1234u32);
         db.insert(id, write::Entry::default()).await?;
 
         assert!(db.get(id, None).await.is_ok());

@@ -1,27 +1,54 @@
-const BASE_PATH = document.getElementById('js_base_path').innerHTML;
-const BASE_PATH_ID = document.getElementById('js_base_path_id').innerHTML;
-const EXT = document.getElementById('js_ext').innerHTML;
+function $(id) {
+  return document.getElementById(id);
+}
 
 document.addEventListener('keydown', onKey);
+$("copy-button").addEventListener("click", copy);
+
+function copy() {
+  const lines = document.querySelectorAll('td.line');
+  const content = Array.from(lines)
+    .map(line => line.textContent)
+    .join('')
+    .trim();
+
+  navigator.clipboard.writeText(content)
+    .then(() => {
+        let toast = $("toast");
+
+        toast.classList.toggle("hidden");
+        toast.classList.toggle("shown");
+
+        setTimeout(() => {
+          toast.classList.toggle("hidden");
+          toast.classList.toggle("shown");
+        }, 1500);
+    }, function(err) {
+      console.error("failed to copy content", err);
+    });
+}
 
 function onKey(e) {
   if (e.key == 'n') {
-    window.location.href = BASE_PATH;
+    window.location.href = "/";
   }
   else if (e.key == 'r') {
-    window.location.href = `${BASE_PATH_ID}?fmt=raw`;
+    window.location.href = "/raw" + window.location.pathname;
   }
   else if (e.key == 'y') {
     navigator.clipboard.writeText(window.location.href);
   }
   else if (e.key == 'd') {
-    window.location.href = `${BASE_PATH_ID}?dl=${EXT}`;
+    window.location.href = "/dl" + window.location.pathname;
   }
   else if (e.key == 'q') {
-    window.location.href = `${BASE_PATH_ID}?fmt=qr`;
+    window.location.href = "/qr" + window.location.pathname;
   }
   else if (e.key == 'p') {
-    window.location.href = `${BASE_PATH_ID}`;
+    window.location.href = window.location.href.split("?")[0];
+  }
+  else if (e.key == 'c') {
+    copy();
   }
   else if (e.key == '?') {
     var overlay = document.getElementById("overlay");
